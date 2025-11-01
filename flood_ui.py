@@ -1,115 +1,249 @@
+# flood_ui_pro.py
 import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
-import matplotlib.pyplot as plt
-
+from tkinter import ttk, messagebox, filedialog
+import threading, time
+import numpy as np
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib.animation import FuncAnimation
+from matplotlib.backends.backend_pdf import PdfPages
 import chaos_flood_model as cfm
+
+# ===== COLORS & STYLE =====
+PRIMARY = "#0078D7"
+LIGHT_BLUE = "#E6F0FA"
+BG = "#F8FBFF"
+DARK_TEXT = "#0C2340"
+FONT = ("Segoe UI", 10)
+TITLE_FONT = ("Segoe UI Semibold", 15)
 
 class FloodUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Chaos-Enhanced Flood Prediction System")
-        self.root.geometry("520x600")
+        self.root.title("🌊 Chaos-Enhanced Flood Prediction System")
+        self.root.geometry("1500x900")
+        self.root.configure(bg=BG)
 
-        ttk.Label(root, text="Chaos-Enhanced Flood Prediction System", font=("Arial", 14, "bold")).pack(pady=10)
+        # ---- ttk style ----
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TFrame", background=BG)
+        style.configure("TLabel", background=BG, foreground=DARK_TEXT, font=FONT)
+        style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=6)
+        style.map("TButton",
+                  background=[("active", PRIMARY)],
+                  foreground=[("active", "white")])
+        style.configure("TNotebook", background=LIGHT_BLUE)
+        style.configure("TNotebook.Tab", padding=[12, 6], font=("Segoe UI", 10, "bold"))
+        style.map("TNotebook.Tab",
+                  background=[("selected", PRIMARY)],
+                  foreground=[("selected", "white")])
 
-        frame = ttk.Frame(root)
-        frame.pack(padx=15, pady=5, fill="x")
+        # ---- header ----
+        title = ttk.Label(root, text="Chaos-Enhanced Flood Prediction System",
+                          font=("Segoe UI Semibold", 18), foreground=PRIMARY)
+        title.pack(pady=10)
+
+        # ---- input frame ----
+        input_frame = ttk.LabelFrame(root, text="Simulation Parameters", padding=10)
+        input_frame.pack(fill=tk.X, padx=20, pady=10)
 
         self.entries = {}
-        params = [
-            ("Grid Size Nx", 40),
-            ("Grid Size Ny", 20),
-            ("Domain Length Lx (m)", 20000),
-            ("Domain Width Ly (m)", 10000),
-            ("Curve Number CN", 70),
-            ("Manning's n", 0.03),
-            ("Simulation Time (s)", 30),
-            ("Output Interval (s)", 10),
-            ("Lorenz σ", 10),
-            ("Lorenz ρ", 28),
-            ("Lorenz β", 8/3),
+        fields = [
+            ("Nx", 40), ("Ny", 20),
+            ("Lx (m)", 20000.0), ("Ly (m)", 10000.0),
+            ("Curve Number (CN)", 70.0), ("Manning n", 0.03),
+            ("Simulation Time (s)", 120.0), ("Output Interval (s)", 10.0),
+            ("Ensemble Members", 3)
         ]
+        for i, (lbl, val) in enumerate(fields):
+            ttk.Label(input_frame, text=lbl).grid(row=0, column=i, padx=6, pady=5)
+            e = ttk.Entry(input_frame, width=8)
+            e.insert(0, str(val))
+            e.grid(row=1, column=i, padx=6, pady=5)
+            self.entries[lbl] = e
 
-        for label, default in params:
-            row = ttk.Frame(frame)
-            row.pack(fill="x", pady=2)
-            ttk.Label(row, text=label, width=22).pack(side="left")
-            e = ttk.Entry(row)
-            e.insert(0, str(default))
-            e.pack(side="right", expand=True, fill="x")
-            self.entries[label] = e
-
+        # ---- buttons ----
         btn_frame = ttk.Frame(root)
-        btn_frame.pack(pady=10)
-        ttk.Button(btn_frame, text="Run Simulation", command=self.run_simulation_thread).pack()
+        btn_frame.pack(fill=tk.X, padx=20, pady=5)
+        self.btn_run = ttk.Button(btn_frame, text="▶ Run Simulation", command=self.run_thread)
+        self.btn_run.pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="💾 Save Panel", command=self.save_panel).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text="🧾 Export All (PDF)", command=self.export_pdf).pack(side=tk.LEFT, padx=6)
 
-        ttk.Label(root, text="Simulation Log:").pack(anchor="w", padx=15)
-        self.text = tk.Text(root, height=15, bg="#111", fg="#0f0", insertbackground="white")
-        self.text.pack(padx=15, pady=5, fill="both", expand=True)
+        # ---- progress bar ----
+        self.progress = ttk.Progressbar(root, orient=tk.HORIZONTAL, length=400, mode='determinate')
+        self.progress.pack(pady=5)
+        self.status_label = ttk.Label(root, text="", font=("Segoe UI", 9))
+        self.status_label.pack()
 
-    def log(self, msg):
-        self.text.insert(tk.END, msg + "\n")
-        self.text.see(tk.END)
-        self.root.update_idletasks()
+        # ---- notebook ----
+        self.tabs = ttk.Notebook(root)
+        self.tabs.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
 
-    def run_simulation_thread(self):
-        thread = threading.Thread(target=self.run_simulation)
-        thread.start()
+        tab_titles = [
+            "Flood Map", "3D Lorenz Attractor",
+            "Rainfall vs Runoff", "Ensemble Spread",
+            "Diagnostics", "Summary"
+        ]
+        self.figures, self.canvases = [], []
+        for t in tab_titles:
+            frame = ttk.Frame(self.tabs, padding=5)
+            self.tabs.add(frame, text=t)
+            fig = Figure(figsize=(7, 5), dpi=100)
+            canvas = FigureCanvasTkAgg(fig, master=frame)
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self.figures.append(fig)
+            self.canvases.append(canvas)
+
+        # ---- footer ----
+        ttk.Label(root, text="© 2025 Chaos Research Lab | Professional Blue-White UI",
+                  foreground="#555", font=("Segoe UI", 9)).pack(pady=5)
+        self.results = None
+        self.anim = None
+
+    # ===========================================================
+    def run_thread(self):
+        threading.Thread(target=self.run_simulation, daemon=True).start()
 
     def run_simulation(self):
         try:
-            Nx = int(self.entries["Grid Size Nx"].get())
-            Ny = int(self.entries["Grid Size Ny"].get())
-            Lx = float(self.entries["Domain Length Lx (m)"].get())
-            Ly = float(self.entries["Domain Width Ly (m)"].get())
-            CN = float(self.entries["Curve Number CN"].get())
-            n = float(self.entries["Manning's n"].get())
-            t_end = float(self.entries["Simulation Time (s)"].get())
-            output_interval = float(self.entries["Output Interval (s)"].get())
-            sigma = float(self.entries["Lorenz σ"].get())
-            rho = float(self.entries["Lorenz ρ"].get())
-            beta = float(self.entries["Lorenz β"].get())
+            self.btn_run.config(state=tk.DISABLED)
+            self.status_label.config(text="Running simulation...")
+            self.progress['value'] = 0
 
-            self.log("Initializing simulation grid...")
-            grid = cfm.FloodGrid(Nx, Ny, Lx, Ly, CN=CN, manning_n=n)
-            grid.set_bed_gaussian(peak=300.0, x0=Lx/2, y0=Ly/2, sigma=0.25*Lx)
+            # read parameters
+            p = {
+                "Nx": int(self.entries["Nx"].get()),
+                "Ny": int(self.entries["Ny"].get()),
+                "Lx": float(self.entries["Lx (m)"].get()),
+                "Ly": float(self.entries["Ly (m)"].get()),
+                "CN": float(self.entries["Curve Number (CN)"].get()),
+                "manning_n": float(self.entries["Manning n"].get()),
+                "t_end": float(self.entries["Simulation Time (s)"].get()),
+                "output_interval": float(self.entries["Output Interval (s)"].get()),
+            }
+            n_ens = int(self.entries["Ensemble Members"].get())
 
-            lorenz = cfm.Lorenz63(sigma=sigma, rho=rho, beta=beta)
-            self.log("Starting simulation...")
+            self.results = []
+            for i in range(n_ens):
+                self.status_label.config(text=f"Running ensemble {i+1}/{n_ens}...")
+                self.progress['value'] = ((i + 1) / n_ens) * 100
+                self.root.update_idletasks()
+                res = cfm.run_flood_simulation(p)
+                self.results.append(res)
+                time.sleep(0.2)
 
-            import sys
-            old_stdout = sys.stdout
-            sys.stdout = self
-            self.buffer = ""
-
-            result = cfm.simulate_flood(grid, lorenz, t_end=t_end, output_interval=output_interval)
-
-            sys.stdout = old_stdout
-
-            self.log("Simulation complete.")
-            self.log(f"Max depth: {result.h.max():.4f} m")
-
-            self.log("Plotting results...")
-            plt.figure(figsize=(6, 4))
-            plt.imshow(result.h, cmap="Blues", origin="lower", extent=[0, Lx/1000, 0, Ly/1000])
-            plt.colorbar(label="Water Depth (m)")
-            plt.title("Final Flood Depth Distribution")
-            plt.xlabel("X (km)")
-            plt.ylabel("Y (km)")
-            plt.tight_layout()
-            plt.show()
-
+            self.status_label.config(text="Simulation completed successfully.")
+            self.update_all()
         except Exception as e:
-            messagebox.showerror("Error", str(e))
+            messagebox.showerror("Error", f"Simulation failed:\n{e}")
+        finally:
+            self.btn_run.config(state=tk.NORMAL)
+            self.progress['value'] = 100
 
-    def write(self, s):
-        if s.strip():
-            self.log(s.strip())
+    # ===========================================================
+    def update_all(self):
+        if not self.results:
+            return
+        res = self.results[0]
+        t = res["time"]
 
-    def flush(self):
-        pass
+        # --- Flood Map ---
+        fig = self.figures[0]; fig.clf()
+        ax = fig.add_subplot(111)
+        ax.set_title("Final Flood Depth Map")
+        im = ax.imshow(res["flood_depth"], cmap="Blues", origin="lower")
+        fig.colorbar(im, ax=ax, label="Depth (m)")
+        self.canvases[0].draw()
 
+        # --- 3D Lorenz (with start & end markers) ---
+        fig = self.figures[1]; fig.clf()
+        ax = fig.add_subplot(111, projection="3d")
+
+        for e in self.results:
+            ax.plot(e["lorenz_x"], e["lorenz_y"], e["lorenz_z"], alpha=0.4, color="#9CCAF6")
+
+        # Main trajectory (highlighted)
+        ax.plot(res["lorenz_x"], res["lorenz_y"], res["lorenz_z"], color=PRIMARY, linewidth=2, label="Main Trajectory")
+
+        # Start and End points
+        ax.scatter(res["lorenz_x"][0], res["lorenz_y"][0], res["lorenz_z"][0],
+                color="green", s=60, label="Start (t=0)")
+        ax.scatter(res["lorenz_x"][-1], res["lorenz_y"][-1], res["lorenz_z"][-1],
+                color="red", s=60, label="End (t=end)")
+
+        # Labels and styling
+        ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.set_zlabel("Z")
+        ax.set_title("Lorenz Attractor (Chaotic Component)")
+        ax.legend(loc="upper left")
+        ax.grid(True)
+
+        # Draw canvas
+        self.canvases[1].draw()
+
+        # --- Rainfall vs Runoff ---
+        fig = self.figures[2]; fig.clf()
+        ax = fig.add_subplot(111)
+        ax.plot(t, res["rain"], color="#33A1FF", label="Rainfall (mm/hr)")
+        ax.plot(t, res["discharge"], color=PRIMARY, label="Discharge (m³/s)")
+        ax.legend(); ax.set_title("Rainfall vs Discharge")
+        self.canvases[2].draw()
+
+        # --- Ensemble Spread ---
+        fig = self.figures[3]; fig.clf()
+        ax = fig.add_subplot(111)
+        ens = np.array([e["discharge"] for e in self.results])
+        mean, std = np.mean(ens, axis=0), np.std(ens, axis=0)
+        ax.plot(t, mean, color="black", label="Mean")
+        ax.fill_between(t, mean - std, mean + std, color="#A0C4FF", alpha=0.6)
+        ax.legend(); ax.set_title("Ensemble Spread (±1σ)")
+        self.canvases[3].draw()
+
+        # --- Diagnostics ---
+        fig = self.figures[4]; fig.clf()
+        ax1 = fig.add_subplot(211)
+        ax1.plot(t, res["max_h_ts"], color="#0056A4")
+        ax1.set_ylabel("Depth (m)"); ax1.set_title("Maximum Flood Depth")
+        ax2 = fig.add_subplot(212)
+        ax2.plot(t, res["total_volume"], color="#0078D7")
+        ax2.set_ylabel("Volume (m³)"); ax2.set_xlabel("Time (s)")
+        self.canvases[4].draw()
+
+        # --- Summary ---
+        fig = self.figures[5]; fig.clf()
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        txt = (
+            f"Peak Depth: {np.max(res['max_h_ts']):.2f} m\n"
+            f"Peak Discharge: {np.max(res['discharge']):.2f} m³/s\n"
+            f"Total Volume: {np.max(res['total_volume']):.2f} m³\n"
+            f"Ensemble Members: {len(self.results)}"
+        )
+        ax.text(0.05, 0.6, txt, fontsize=13, color=PRIMARY)
+        self.canvases[5].draw()
+
+    # ===========================================================
+    def save_panel(self):
+        idx = self.tabs.index(self.tabs.select())
+        fig = self.figures[idx]
+        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG", "*.png")])
+        if path:
+            fig.savefig(path, dpi=300)
+            messagebox.showinfo("Saved", f"Panel saved to {path}")
+
+    def export_pdf(self):
+        path = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")])
+        if path:
+            with PdfPages(path) as pdf:
+                for fig in self.figures:
+                    pdf.savefig(fig)
+            messagebox.showinfo("Exported", f"All panels saved to {path}")
+
+# ===========================================================
 if __name__ == "__main__":
     root = tk.Tk()
     app = FloodUI(root)
