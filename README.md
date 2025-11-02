@@ -122,7 +122,7 @@ pip install reportlab
 
 ## 🧑‍💻 Authors
 
-Developed by **Chaos Research Lab (2025)**
+Developed by **PapiiCholoo(2025)**
 Lead Developer: *Theomel De Guzman*
 
 ---
